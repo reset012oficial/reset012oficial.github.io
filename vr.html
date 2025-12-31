@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Web Quest 3 - Debug Mode</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #camera-feed { display: none; }
+        
+        /* TELA DE INÍCIO */
+        #start-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #111; z-index: 999;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white; text-align: center; padding: 20px;
+        }
+        button {
+            padding: 20px 40px; font-size: 1.2rem; background: #0088ff; color: white;
+            border: none; border-radius: 12px; cursor: pointer; margin-top: 20px;
+            font-weight: bold; box-shadow: 0 4px 15px rgba(0,136,255,0.4);
+        }
+        button:active { transform: scale(0.95); }
+
+        /* DEBUG CONSOLE (Para ver erros no celular) */
+        #debug-console {
+            position: absolute; bottom: 10px; left: 10px; width: 90%; 
+            color: #ff5555; background: rgba(0,0,0,0.8); 
+            font-family: monospace; font-size: 12px; pointer-events: none; z-index: 1000;
+            padding: 10px; border-radius: 5px; white-space: pre-wrap;
+        }
+
+        .hud-text { position: absolute; color: lime; top: 10px; left: 10px; z-index: 20; pointer-events: none; }
+        .app-window { 
+            width: 480px; height: 320px; 
+            background: rgba(20, 20, 20, 0.95); 
+            border: 2px solid #555; border-radius: 15px; 
+            box-shadow: 0 0 30px rgba(0,136,255,0.3); overflow: hidden; 
+        }
+        .app-header { height: 35px; background: #222; color: #fff; display: flex; align-items: center; padding: 0 15px; font-weight: bold; }
+    </style>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="start-screen">
+        <h1>Web Quest 3</h1>
+        <p>1. Use HTTPS ou Localhost<br>2. iPhone: Desligue o modo silencioso</p>
+        <button id="btn-start">INICIAR SISTEMA</button>
+        <div id="debug-console">Aguardando ação...</div>
+    </div>
+
+    <div id="info" class="hud-text">Sistema Pronto</div>
+    <video id="camera-feed" autoplay playsinline webkit-playsinline></video>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { CSS3DRenderer, CSS3DObject } from 'three/addons/renderers/CSS3DRenderer.js';
+        import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
+        import { DeviceOrientationControls } from 'three/addons/controls/DeviceOrientationControls.js';
+
+        // --- SISTEMA DE LOG VISUAL ---
+        function log(msg) {
+            const el = document.getElementById('debug-console');
+            el.innerText += "\n> " + msg;
+            console.log(msg);
+        }
+
+        let scene, camera, renderer, cssRenderer, effect, controls;
+        let videoElement, videoTexture;
+        let virtualHandMesh, hands;
+        let frameCount = 0;
+
+        document.getElementById('btn-start').addEventListener('click', async () => {
+            log("Botão clicado. Iniciando...");
+            
+            // 1. Solicita Fullscreen (Funciona Android, falha iPhone silenciosamente)
+            try {
+                if (document.documentElement.requestFullscreen) {
+                    await document.documentElement.requestFullscreen();
+                } else if (document.documentElement.webkitRequestFullscreen) {
+                    await document.documentElement.webkitRequestFullscreen();
+                }
+            } catch(e) { log("Aviso: Fullscreen negado (normal no iPhone)"); }
+
+            // 2. Permissão de Giroscópio (CRUCIAL PARA IPHONE 13+)
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                log("Solicitando permissão iOS...");
+                try {
+                    const permissionState = await DeviceOrientationEvent.requestPermission();
+                    if (permissionState === 'granted') {
+                        log("Permissão iOS Concedida!");
+                        init();
+                    } else {
+                        log("ERRO: Permissão de movimento negada.");
+                        alert("Você precisa permitir o acesso aos sensores de movimento!");
+                    }
+                } catch (error) {
+                    log("Erro fatal no iOS request: " + error);
+                }
+            } else {
+                // Android ou iOS antigo
+                log("Dispositivo Android/Padrão detectado.");
+                init();
+            }
+        });
+
+        async function init() {
+            try {
+                document.getElementById('start-screen').style.display = 'none';
+                
+                scene = new THREE.Scene();
+                camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+                // --- CÂMERA ---
+                log("Iniciando câmera...");
+                videoElement = document.getElementById('camera-feed');
+                
+                const constraints = { 
+                    video: { 
+                        facingMode: 'environment', 
+                        width: { ideal: 1280 }, 
+                        height: { ideal: 720 } 
+                    } 
+                };
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    videoElement.srcObject = stream;
+                    await videoElement.play();
+                    log("Câmera OK!");
+                } catch (err) {
+                    log("ERRO DE CÂMERA: " + err.name);
+                    log("Dica: Use HTTPS ou localhost.");
+                    // Continua mesmo sem câmera para testar VR
+                }
+
+                // Fundo VR
+                videoTexture = new THREE.VideoTexture(videoElement);
+                videoTexture.colorSpace = THREE.SRGBColorSpace;
+                const bgMesh = new THREE.Mesh(
+                    new THREE.SphereGeometry(500, 60, 40).scale(-1, 1, 1),
+                    new THREE.MeshBasicMaterial({ map: videoTexture })
+                );
+                scene.add(bgMesh);
+
+                // --- RENDERERS ---
+                renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.domElement.style.position = 'absolute'; 
+                renderer.domElement.style.top = 0;
+                document.body.appendChild(renderer.domElement);
+
+                cssRenderer = new CSS3DRenderer();
+                cssRenderer.setSize(window.innerWidth, window.innerHeight);
+                cssRenderer.domElement.style.position = 'absolute'; 
+                cssRenderer.domElement.style.top = 0; 
+                document.body.appendChild(cssRenderer.domElement);
+
+                effect = new StereoEffect(renderer);
+                effect.eyeSeparation = 1;
+
+                controls = new DeviceOrientationControls(camera);
+
+                // Apps
+                createApps();
+
+                // Mão
+                virtualHandMesh = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.05, 16, 16),
+                    new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+                );
+                scene.add(virtualHandMesh);
+                scene.add(new THREE.AmbientLight(0xffffff));
+
+                // Loop
+                setupMediaPipe();
+                animate();
+                log("Sistema rodando.");
+
+            } catch (e) {
+                log("ERRO FATAL NO INIT: " + e.message);
+            }
+        }
+
+        function createApps() {
+            const apps = [
+                { title: "YouTube", url: "https://www.youtube.com/embed/dQw4w9WgXcQ" },
+                { title: "Google", url: "https://www.wikipedia.org" }
+            ];
+            apps.forEach((app, i) => {
+                const angle = (i - 0.5) * 0.8; 
+                createFloatingApp(app.url, app.title, Math.sin(angle)*2.5, 0, -Math.cos(angle)*2.5, -angle);
+            });
+        }
+
+        function createFloatingApp(url, title, x, y, z, ry) {
+            const div = document.createElement('div');
+            div.className = 'app-window';
+            div.innerHTML = `<div class="app-header">${title}</div><iframe src="${url}" width="100%" height="100%" style="border:none;"></iframe>`;
+            const obj = new CSS3DObject(div);
+            obj.position.set(x, y, z);
+            obj.rotation.y = ry;
+            obj.scale.set(0.005, 0.005, 0.005);
+            scene.add(obj);
+        }
+
+        function setupMediaPipe() {
+            try {
+                hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+                hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.5 });
+                hands.onResults(onHandsResults);
+                log("MediaPipe carregado.");
+            } catch(e) { log("Erro MediaPipe: " + e); }
+        }
+
+        function onHandsResults(results) {
+            if (results.multiHandLandmarks?.length > 0) {
+                const lm = results.multiHandLandmarks[0];
+                virtualHandMesh.position.set((0.5 - lm[8].x)*4, (0.5 - lm[8].y)*3, -2);
+                const dist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+                virtualHandMesh.material.color.set(dist < 0.05 ? 0xff0000 : 0x00ff00);
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            frameCount++;
+            if (frameCount % 3 === 0 && videoElement.readyState >= 2) {
+                hands.send({image: videoElement}).catch(e => {}); 
+            }
+            cssRenderer.render(scene, camera);
+            effect.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            effect.setSize(window.innerWidth, window.innerHeight);
+            cssRenderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
